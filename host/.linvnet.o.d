@@ -1,4 +1,4 @@
-linvcons.o: /home/ubuntu/mpss-modules/host/linvcons.c \
+linvnet.o: /home/ubuntu/mpss-modules/host/linvnet.c \
  include/linux/compiler-version.h include/linux/kconfig.h \
  include/generated/autoconf.h include/linux/compiler_types.h \
  include/linux/compiler_attributes.h include/linux/compiler-gcc.h \
@@ -424,4 +424,20 @@ linvcons.o: /home/ubuntu/mpss-modules/host/linvcons.c \
  /home/ubuntu/mpss-modules/include/mic/mic_pm.h \
  /home/ubuntu/mpss-modules/include/mic/io_interface.h \
  /home/ubuntu/mpss-modules/include/mic/micveth_common.h \
- /home/ubuntu/mpss-modules/include/mic_interrupts.h
+ /home/ubuntu/mpss-modules/include/mic_interrupts.h \
+ /home/ubuntu/mpss-modules/include/mic_common.h include/linux/ip.h \
+ include/uapi/linux/ip.h include/linux/tcp.h include/linux/win_minmax.h \
+ include/net/sock.h include/linux/rculist_nulls.h \
+ include/linux/indirect_call_wrapper.h include/net/dst.h \
+ include/linux/rcuref.h include/net/neighbour.h include/net/tcp_states.h \
+ include/linux/net_tstamp.h include/uapi/linux/net_tstamp.h \
+ include/net/l3mdev.h include/net/fib_rules.h \
+ include/uapi/linux/fib_rules.h include/net/fib_notifier.h \
+ include/net/inet_connection_sock.h include/net/inet_sock.h \
+ include/linux/jhash.h include/net/request_sock.h \
+ include/net/netns/hash.h include/net/inet_timewait_sock.h \
+ include/net/timewait_sock.h include/uapi/linux/tcp.h \
+ /home/ubuntu/mpss-modules/include/mic/micveth.h \
+ /home/ubuntu/mpss-modules/include/mic/micveth_dma.h \
+ /home/ubuntu/mpss-modules/include/mic/mic_dma_lib.h \
+ /home/ubuntu/mpss-modules/include/mic/micveth_common.h

@@ -38,6 +38,10 @@
 
 /* TODO: Improve debug messages */
 
+static micvcons_t g_micvcons = {
+	.port_list = LIST_HEAD_INIT(g_micvcons.port_list)
+};
+
 static int micvcons_open(struct tty_struct * tty, struct file * filp);
 static void micvcons_close(struct tty_struct * tty, struct file * filp);
 static ssize_t micvcons_write(struct tty_struct *tty, const unsigned char *buf, size_t count);
@@ -50,266 +54,257 @@ static void micvcons_wakeup_readbuf(struct work_struct *work);
 static int micvcons_resume(struct _mic_ctx_t *mic_ctx);
 
 static struct tty_operations micvcons_tty_ops = {
-	.open = micvcons_open,
-	.close = micvcons_close,
-	.write = micvcons_write,
-	.write_room = micvcons_write_room,
-	.set_termios = micvcons_set_termios,
-	.throttle = micvcons_throttle,
-	.unthrottle = micvcons_unthrottle,
+    .open = micvcons_open,
+    .close = micvcons_close,
+    .write = micvcons_write,
+    .write_room = micvcons_write_room,
+    .set_termios = micvcons_set_termios,
+    .throttle = micvcons_throttle,
+    .unthrottle = micvcons_unthrottle,
 };
 
 static struct tty_driver *micvcons_tty = NULL;
 static u16 extra_timeout = 0;
 static u8 restart_timer_flag = MICVCONS_TIMER_RESTART;
-static struct timer_list vcons_timer;
-static struct list_head timer_list_head;
 static spinlock_t timer_list_lock;
 
 int
 micvcons_create(int num_bds)
 {
-	micvcons_port_t *port;
-	bd_info_t *bd_info;
-	int bd, ret = 0;
-	char wq_name[14];
-	struct device *dev;
+    micvcons_port_t *port;
+    bd_info_t *bd_info;
+    int bd, ret = 0;
+    char wq_name[14];
+    struct device *dev;
 
-	INIT_LIST_HEAD(&timer_list_head);
+    INIT_LIST_HEAD(&g_micvcons.port_list);
 
-	if (micvcons_tty)
-		goto exit;
-	micvcons_tty = tty_alloc_driver(num_bds, TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV);
-	if (IS_ERR(micvcons_tty)) {
-		ret = PTR_ERR(micvcons_tty);
-		micvcons_tty = NULL;
-		goto exit;
-	}
-	micvcons_tty->owner = THIS_MODULE;
-	micvcons_tty->driver_name = MICVCONS_DEVICE_NAME;
-	micvcons_tty->name = MICVCONS_DEVICE_NAME;
-	micvcons_tty->major = 0;
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0))
-	micvcons_tty->minor_num = num_bds;
-#endif
-	micvcons_tty->minor_start = 0;
-	micvcons_tty->type = TTY_DRIVER_TYPE_SERIAL;
-	micvcons_tty->subtype = SERIAL_TYPE_NORMAL;
-	micvcons_tty->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
-	micvcons_tty->init_termios = tty_std_termios;
-	micvcons_tty->init_termios.c_iflag = IGNCR;
-	micvcons_tty->init_termios.c_oflag = 0;
-	micvcons_tty->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-	micvcons_tty->init_termios.c_lflag = 0;
+    if (micvcons_tty)
+        goto exit;
+    micvcons_tty = tty_alloc_driver(num_bds, TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV);
+    if (IS_ERR(micvcons_tty)) {
+        ret = PTR_ERR(micvcons_tty);
+        micvcons_tty = NULL;
+        goto exit;
+    }
+    micvcons_tty->owner = THIS_MODULE;
+    micvcons_tty->driver_name = MICVCONS_DEVICE_NAME;
+    micvcons_tty->name = MICVCONS_DEVICE_NAME;
+    micvcons_tty->major = 0;
+    micvcons_tty->minor_start = 0;
+    micvcons_tty->type = TTY_DRIVER_TYPE_SERIAL;
+    micvcons_tty->subtype = SERIAL_TYPE_NORMAL;
+    micvcons_tty->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV;
+    micvcons_tty->init_termios = tty_std_termios;
+    micvcons_tty->init_termios.c_iflag = IGNCR;
+    micvcons_tty->init_termios.c_oflag = 0;
+    micvcons_tty->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+    micvcons_tty->init_termios.c_lflag = 0;
 
-	tty_set_operations(micvcons_tty, &micvcons_tty_ops);
+    tty_set_operations(micvcons_tty, &micvcons_tty_ops);
 
-	if ((ret = tty_register_driver(micvcons_tty)) != 0) {
-		printk("Failed to register vcons tty driver\n");
-		tty_driver_kref_put(micvcons_tty);
-		micvcons_tty = NULL;
-		goto exit;
-	}
+    if ((ret = tty_register_driver(micvcons_tty)) != 0) {
+        printk("Failed to register vcons tty driver\n");
+        tty_driver_kref_put(micvcons_tty);
+        micvcons_tty = NULL;
+        goto exit;
+    }
 
-	for (bd = 0; bd < num_bds; bd++) {
-		port = &mic_data.dd_ports[bd];
-		port->dp_bdinfo = mic_data.dd_bi[bd];
+    for (bd = 0; bd < num_bds; bd++) {
+        port = &mic_data.dd_ports[bd];
+        port->dp_bdinfo = mic_data.dd_bi[bd];
 
-		spin_lock_init(&port->dp_lock);
-		mutex_init (&port->dp_mutex);
+        spin_lock_init(&port->dp_lock);
+        mutex_init(&port->dp_mutex);
 
-		bd_info = (bd_info_t *)port->dp_bdinfo;
-		bd_info->bi_port = port;
+        bd_info = (bd_info_t *)port->dp_bdinfo;
+        bd_info->bi_port = port;
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0))
-		tty_port_init(&port->port);
-		dev = tty_port_register_device(&port->port, micvcons_tty, bd, NULL);
-#else
-		dev = tty_register_device(micvcons_tty, bd, NULL);
-		if (IS_ERR(dev)) {
-			printk("Failed to register vcons tty device\n");
-			micvcons_destroy(bd);
-			ret = PTR_ERR(dev);
-			goto exit;
-		}
-#endif
-		snprintf(wq_name, sizeof(wq_name), "VCONS MIC %d", bd);
-		port->dp_wq = __mic_create_singlethread_workqueue(wq_name);
-		if (!port->dp_wq) {
-			printk(KERN_ERR "%s: create_singlethread_workqueue\n", 
-								__func__);
-			tty_unregister_device(micvcons_tty, bd);
-			micvcons_destroy(bd);
-			ret = -ENOMEM;
-			goto exit;
-		}
-		INIT_WORK(&port->dp_wakeup_read_buf, micvcons_wakeup_readbuf);
-	}
-	timer_setup(&vcons_timer, micvcons_timeout, 0);
+        tty_port_init(&port->port);
+        dev = tty_port_register_device(&port->port, micvcons_tty, bd, NULL);
+
+        if (IS_ERR(dev)) {
+            printk("Failed to register vcons tty device\n");
+            micvcons_destroy(bd);
+            ret = PTR_ERR(dev);
+            goto exit;
+        }
+
+        snprintf(wq_name, sizeof(wq_name), "VCONS MIC %d", bd);
+        port->dp_wq = __mic_create_singlethread_workqueue(wq_name);
+        if (!port->dp_wq) {
+            printk(KERN_ERR "%s: create_singlethread_workqueue\n", __func__);
+            tty_unregister_device(micvcons_tty, bd);
+            micvcons_destroy(bd);
+            ret = -ENOMEM;
+            goto exit;
+        }
+        INIT_WORK(&port->dp_wakeup_read_buf, micvcons_wakeup_readbuf);
+    }
+    
+    timer_setup(&g_micvcons.timer, micvcons_timeout, 0);
+    spin_lock_init(&timer_list_lock);
+
 exit:
-	return ret;
+    return ret;
 }
 
 void micvcons_destroy(int num_bds)
 {
-	int bd;
-	micvcons_port_t *port;
+    int bd;
+    micvcons_port_t *port;
 
-	if (!micvcons_tty)
-		return;
-	for (bd = 0; bd < num_bds; bd++) {
-		port = &mic_data.dd_ports[bd];
-		destroy_workqueue(port->dp_wq);
-		tty_unregister_device(micvcons_tty, bd);
-	}
-	tty_unregister_driver(micvcons_tty);
-	tty_driver_kref_put(micvcons_tty);
-	micvcons_tty = NULL;
+    if (!micvcons_tty)
+        return;
+    for (bd = 0; bd < num_bds; bd++) {
+        port = &mic_data.dd_ports[bd];
+        destroy_workqueue(port->dp_wq);
+        tty_unregister_device(micvcons_tty, bd);
+    }
+    tty_unregister_driver(micvcons_tty);
+    tty_driver_kref_put(micvcons_tty);
+    micvcons_tty = NULL;
 }
 
 static int
 micvcons_open(struct tty_struct * tty, struct file * filp)
 {
-	micvcons_port_t *port = &mic_data.dd_ports[tty->index];
-	int ret = 0;
-	mic_ctx_t *mic_ctx = get_per_dev_ctx(tty->index);
+    micvcons_port_t *port = &mic_data.dd_ports[tty->index];
+    int ret = 0;
+    mic_ctx_t *mic_ctx = get_per_dev_ctx(tty->index);
 
-	tty->driver_data = port;
+    tty->driver_data = port;
 
-	mutex_lock(&port->dp_mutex);
-	spin_lock_bh(&port->dp_lock);
+    mutex_lock(&port->dp_mutex);
+    spin_lock_bh(&port->dp_lock);
 
-	if ((filp->f_flags & O_ACCMODE) != O_RDONLY) {
-		if (port->dp_writer) {
-			ret = -EBUSY;
-			goto exit_locked;
-		}
-		port->dp_writer = filp;
-		port->dp_bytes = 0;
-	}
+    if ((filp->f_flags & O_ACCMODE) != O_RDONLY) {
+        if (port->dp_writer) {
+            ret = -EBUSY;
+            goto exit_locked;
+        }
+        port->dp_writer = filp;
+        port->dp_bytes = 0;
+    }
 
-	if ((filp->f_flags & O_ACCMODE) != O_WRONLY) {
-		if (port->dp_reader) {
-			ret = -EBUSY;
-			goto exit_locked;
-		}
-		port->dp_reader = filp;
-		port->dp_canread = 1;
-	}
+    if ((filp->f_flags & O_ACCMODE) != O_WRONLY) {
+        if (port->dp_reader) {
+            ret = -EBUSY;
+            goto exit_locked;
+        }
+        port->dp_reader = filp;
+        port->dp_canread = 1;
+    }
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0))
-	tty->low_latency = 0;
-#endif
-
-	if (!port->dp_tty)
-		port->dp_tty = tty;
-	if (!port->dp_vcons)
-		port->dp_vcons = &mic_ctx->bi_vcons;
-	if (tty->count == 1) {
-		ret = micvcons_start(mic_ctx);
-		if (ret != 0)
-			goto exit_locked;
-		spin_lock(&timer_list_lock);
-		list_add_tail_rcu(&port->list_member, &timer_list_head);
-		if (list_is_singular(&timer_list_head)) {
-			restart_timer_flag = MICVCONS_TIMER_RESTART;
-			mod_timer(&vcons_timer, jiffies + 
-				msecs_to_jiffies(MICVCONS_SHORT_TIMEOUT));
-		}
-		spin_unlock(&timer_list_lock);
-	}
+    if (!port->dp_tty)
+        port->dp_tty = tty;
+    if (!port->dp_vcons)
+        port->dp_vcons = &mic_ctx->bi_vcons;
+    if (tty->count == 1) {
+        ret = micvcons_start(mic_ctx);
+        if (ret != 0)
+            goto exit_locked;
+        spin_lock(&timer_list_lock);
+        list_add_tail_rcu(&port->list_member, &g_micvcons.port_list);
+        if (list_is_singular(&g_micvcons.port_list)) {
+            restart_timer_flag = MICVCONS_TIMER_RESTART;
+            mod_timer(&g_micvcons.timer, jiffies + 
+                msecs_to_jiffies(MICVCONS_SHORT_TIMEOUT));
+        }
+        spin_unlock(&timer_list_lock);
+    }
 
 exit_locked:
-	spin_unlock_bh(&port->dp_lock);
-	mutex_unlock(&port->dp_mutex);
-	return ret;
+    spin_unlock_bh(&port->dp_lock);
+    mutex_unlock(&port->dp_mutex);
+    return ret;
 }
 
 static inline void
 micvcons_del_timer_entry(micvcons_port_t *port)
 {
-	spin_lock(&timer_list_lock);
-	list_del_rcu(&port->list_member);
-	if (list_empty(&timer_list_head)) {
-		restart_timer_flag = MICVCONS_TIMER_SHUTDOWN;
-		spin_unlock(&timer_list_lock);
-		del_timer_sync(&vcons_timer);
-	} else {
-		spin_unlock(&timer_list_lock);
-	}
-	synchronize_rcu();
+    spin_lock(&timer_list_lock);
+    list_del_rcu(&port->list_member);
+    if (list_empty(&g_micvcons.port_list)) {
+        restart_timer_flag = MICVCONS_TIMER_SHUTDOWN;
+        spin_unlock(&timer_list_lock);
+        del_timer_sync(&g_micvcons.timer);
+    } else {
+        spin_unlock(&timer_list_lock);
+    }
+    synchronize_rcu();
 }
 
 static void
 micvcons_close(struct tty_struct * tty, struct file * filp)
 {
-	micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
+    micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
 
-	mutex_lock(&port->dp_mutex);
-	if (tty->count == 1) {
-		micvcons_del_timer_entry(port);
-		flush_workqueue(port->dp_wq);
-	}
-	spin_lock_bh(&port->dp_lock);
-	if (port->dp_reader == filp)
-		port->dp_reader = 0;
+    mutex_lock(&port->dp_mutex);
+    if (tty->count == 1) {
+        micvcons_del_timer_entry(port);
+        flush_workqueue(port->dp_wq);
+    }
+    spin_lock_bh(&port->dp_lock);
+    if (port->dp_reader == filp)
+        port->dp_reader = 0;
 
-	if (port->dp_writer == filp)
-		port->dp_writer = 0;
+    if (port->dp_writer == filp)
+        port->dp_writer = 0;
 
-	if (tty->count == 1)
-		port->dp_tty = 0;
-	spin_unlock_bh(&port->dp_lock);
-	mutex_unlock(&port->dp_mutex);
+    if (tty->count == 1)
+        port->dp_tty = 0;
+    spin_unlock_bh(&port->dp_lock);
+    mutex_unlock(&port->dp_mutex);
 }
 
 static ssize_t
 micvcons_write(struct tty_struct * tty, const unsigned char *buf, size_t count)
 {
-	micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
-	mic_ctx_t *mic_ctx = get_per_dev_ctx(tty->index);
-	ssize_t bytes=0, status;
-	struct vcons_buf *vcons_host_header;
-	u8 card_alive = 1;
+    micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
+    mic_ctx_t *mic_ctx = get_per_dev_ctx(tty->index);
+    ssize_t bytes=0, status;
+    struct vcons_buf *vcons_host_header;
+    u8 card_alive = 1;
 
-	spin_lock_bh(&port->dp_lock);
-	vcons_host_header = (struct vcons_buf *)port->dp_vcons->dc_hdr_virt;
-	if (vcons_host_header->mic_magic == MIC_VCONS_SLEEPING) {
-		status = micvcons_resume(mic_ctx);
-		if (status != 0) {
-			/* If card can not wakeup, it is dead. */
-			card_alive = 0;
-			goto exit;
-		}
-	}
-	if (vcons_host_header->mic_magic != MIC_VCONS_READY)
-		goto exit;
-	bytes = micvcons_port_write(port, buf, count);
-	if (bytes) {
-		mic_send_hvc_intr(mic_ctx);
-		extra_timeout = 0;
-	}
+    spin_lock_bh(&port->dp_lock);
+    vcons_host_header = (struct vcons_buf *)port->dp_vcons->dc_hdr_virt;
+    if (vcons_host_header->mic_magic == MIC_VCONS_SLEEPING) {
+        status = micvcons_resume(mic_ctx);
+        if (status != 0) {
+            /* If card can not wakeup, it is dead. */
+            card_alive = 0;
+            goto exit;
+        }
+    }
+    if (vcons_host_header->mic_magic != MIC_VCONS_READY)
+        goto exit;
+    bytes = micvcons_port_write(port, buf, count);
+    if (bytes) {
+        mic_send_hvc_intr(mic_ctx);
+        extra_timeout = 0;
+    }
 exit:
-	spin_unlock_bh(&port->dp_lock);
-	if (!card_alive)
-		micvcons_del_timer_entry(port);
-	return bytes;
+    spin_unlock_bh(&port->dp_lock);
+    if (!card_alive)
+        micvcons_del_timer_entry(port);
+    return bytes;
 }
 
 static unsigned int
 micvcons_write_room(struct tty_struct *tty)
 {
-	micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
-	int room;
+    micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
+    int room;
 
-	spin_lock_bh(&port->dp_lock);
-	if (port->dp_out)
-		room = micscif_rb_space(port->dp_out);
-	else
-		room = 0;
-	spin_unlock_bh(&port->dp_lock);
+    spin_lock_bh(&port->dp_lock);
+    if (port->dp_out)
+        room = micscif_rb_space(port->dp_out);
+    else
+        room = 0;
+    spin_unlock_bh(&port->dp_lock);
 
-	return room;
+    return room;
 }
 
 static void
@@ -496,7 +491,7 @@ micvcons_wakeup_readbuf(struct work_struct *work)
 static void
 micvcons_timeout(struct timer_list *t)
 {
-	struct micvcons *vcons = from_timer(vcons, t, timer);
+	struct micvcons *vcons = container_of(t, struct micvcons, timer);
 	micvcons_port_t *port;
 	u8 console_active = 0;
 	int num_chars_read = 0;
@@ -514,7 +509,7 @@ micvcons_timeout(struct timer_list *t)
 		extra_timeout = (console_active ? 0 :
 				extra_timeout + MICVCONS_SHORT_TIMEOUT);
 		extra_timeout = min(extra_timeout, (u16)MICVCONS_MAX_TIMEOUT);
-		mod_timer(&vcons_timer, jiffies + 
+		mod_timer(&g_micvcons.timer, jiffies + 
 			msecs_to_jiffies(MICVCONS_SHORT_TIMEOUT+extra_timeout));
 	}
 	spin_unlock(&timer_list_lock);

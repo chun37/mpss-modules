@@ -98,6 +98,8 @@ typedef struct micvcons {
 	dma_addr_t	dc_hdr_dma_addr;
 	dma_addr_t	dc_dma_addr;
 	uint32_t		dc_size;
+	struct timer_list       timer;
+	struct list_head        port_list;
 } micvcons_t;
 
 typedef struct micvcons_port {
