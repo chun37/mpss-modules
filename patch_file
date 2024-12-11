@@ -1,0 +1,14 @@
+diff --git a/include/mic/micscif_nm.h b/include/mic/micscif_nm.h
+index 103e1f2..8f9d384 100644
+--- a/include/mic/micscif_nm.h
++++ b/include/mic/micscif_nm.h
+@@ -100,7 +100,7 @@ micscif_inc_node_refcnt(struct micscif_dev *dev, long cnt)
+                        SCIFDEV_STOPPING == dev->sd_state ||
+                        SCIFDEV_INIT == dev->sd_state)
+                        goto bail_out;
+-                if (test_bit(SCIF_NODE_MAGIC_BIT, 
+-                       &dev->scif_ref_cnt.counter)) {
++                if (test_bit(SCIF_NODE_MAGIC_BIT,
++                       (const unsigned long *)&dev->scif_ref_cnt.counter)) {
+                        /* Notify host that the remote node must be woken */
+                        struct nodemsg notif_msg;

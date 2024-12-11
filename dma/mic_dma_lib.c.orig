@@ -36,7 +36,6 @@
 #include<linux/module.h>
 #include<linux/init.h>
 #include<linux/slab.h>
-#include<linux/pci.h>
 #include<asm/io.h>
 #include<linux/mm.h>
 #include<linux/kernel.h>
@@ -216,7 +215,7 @@ alloc_dma_desc_ring_mem(struct dma_channel *ch, struct mic_dma_ctx_t *dma_ctx)
 	micscif_pci_dev(dma_ctx->device_num, &pdev);
 	ch->desc_ring_phys = mic_map_single(dma_ctx->device_num - 1, pdev, (void *)ch->desc_ring,
 			(DMA_DESC_RING_SIZE * sizeof(*ch->desc_ring)) + PAGE_SIZE);
-	BUG_ON(dma_mapping_error(&pdev->dev, ch->desc_ring_phys));
+	BUG_ON(pci_dma_mapping_error(pdev, ch->desc_ring_phys));
 #endif
 }
 
@@ -391,7 +390,7 @@ void mi_mic_dma_chan_set_dstat_wb(struct mic_dma_ctx_t *dma_ctx,
 		micscif_pci_dev(dma_ctx->device_num, &pdev);
 		chan->dstat_wb_phys = mic_map_single(dma_ctx->device_num - 1, pdev, chan->dstat_wb_loc,
 			sizeof(uint32_t));
-		BUG_ON(dma_mapping_error(&pdev->dev, chan->dstat_wb_phys));
+		BUG_ON(pci_dma_mapping_error(pdev, chan->dstat_wb_phys));
 #endif
 	}
 	md_mic_dma_chan_set_dstat_wb(&dma_ctx->dma_dev, chan);
@@ -1542,18 +1541,18 @@ mic_dma_proc_reg_open(struct inode *inode, struct file *file)
 	return single_open(file, mic_dma_proc_reg_show, NULL);
 }
 
-struct proc_ops micdma_ring_fops = {
-	.proc_open		= mic_dma_proc_ring_open,
-	.proc_read		= seq_read,
-	.proc_lseek		= seq_lseek,
-        .proc_release 	= single_release,
+struct file_operations micdma_ring_fops = {
+	.open		= mic_dma_proc_ring_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+        .release 	= single_release,
 };
 
-struct proc_ops micdma_reg_fops = {
-	.proc_open		= mic_dma_proc_reg_open,
-	.proc_read		= seq_read,
-	.proc_lseek		= seq_lseek,
-        .proc_release 	= single_release,
+struct file_operations micdma_reg_fops = {
+	.open		= mic_dma_proc_reg_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+        .release 	= single_release,
 };
 
 static void

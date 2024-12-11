@@ -45,6 +45,7 @@
 #include <linux/hugetlb.h>
 #endif
 #endif
+#include <linux/mmap_lock.h>
 #include "scif.h"
 #include <linux/errno.h>
 #include <linux/hardirq.h>
@@ -55,6 +56,7 @@
 #include <linux/gfp.h>
 #include <linux/vmalloc.h>
 #include <asm/io.h>
+#include <linux/mmzone.h>
 #include <linux/kernel.h>
 #include <linux/mm_types.h>
 #include <linux/jiffies.h>
@@ -79,6 +81,7 @@
 #include <linux/netdevice.h>
 #include <linux/debugfs.h>
 #include "mic/micscif_kmem_cache.h"
+#include <linux/mm.h>
 
 struct rma_mmu_notifier {
 #ifdef CONFIG_MMU_NOTIFIER
@@ -832,7 +835,7 @@ static __always_inline void *scif_zalloc(size_t size)
 	if (!align)
 		return NULL;
 
-	if (align <= (1 << (MAX_ORDER + PAGE_SHIFT - 1)))
+	if (align <= (1 << (MAX_ORDER_NR_PAGES + PAGE_SHIFT - 1)))
 		if ((ret = (void*)__get_free_pages(GFP_KERNEL | __GFP_ZERO,
 						get_order(align))))
 			goto done;
@@ -915,18 +918,18 @@ static inline int __scif_dec_pinned_vm_lock(struct mm_struct *mm,
 {
 	if (mm && nr_pages && mic_ulimit_check) {
 		if (try_lock) {
-			if (!down_write_trylock(&mm->mmap_sem)) {
+			if (!down_write_trylock(&mm->mmap_lock)) {
 				return -1;
 			}
 		} else {
-			down_write(&mm->mmap_sem);
+			mmap_write_lock(mm);
 		}
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 1, 0))
-		mm->pinned_vm -= nr_pages;
+		atomic64_sub(nr_pages, &mm->pinned_vm);
 #else
 		mm->locked_vm -= nr_pages;
 #endif
-		up_write(&mm->mmap_sem);
+		mmap_write_unlock(mm);
 	}
 	return 0;
 }
@@ -938,7 +941,7 @@ static inline int __scif_check_inc_pinned_vm(struct mm_struct *mm,
 		unsigned long locked, lock_limit;
 		locked = nr_pages;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 1, 0))
-		locked += mm->pinned_vm;
+		locked += atomic64_read(&mm->pinned_vm);
 #else
 		locked += mm->locked_vm;
 #endif
@@ -949,7 +952,7 @@ static inline int __scif_check_inc_pinned_vm(struct mm_struct *mm,
 			return -ENOMEM;
 		} else {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 1, 0))
-			mm->pinned_vm = locked;
+			atomic64_set(&mm->pinned_vm, locked);
 #else
 			mm->locked_vm = locked;
 #endif

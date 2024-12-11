@@ -34,16 +34,16 @@
  */
 
 #include "micint.h"
+#include <linux/tty_driver.h>
 
 /* TODO: Improve debug messages */
 
 static int micvcons_open(struct tty_struct * tty, struct file * filp);
 static void micvcons_close(struct tty_struct * tty, struct file * filp);
-static int micvcons_write(struct tty_struct * tty, const unsigned char *buf, 
-								int count);
-static int micvcons_write_room(struct tty_struct *tty);
-static void micvcons_set_termios(struct tty_struct *tty, struct ktermios * old);
-static void micvcons_timeout(unsigned long);
+static ssize_t micvcons_write(struct tty_struct *tty, const unsigned char *buf, size_t count);
+static unsigned int micvcons_write_room(struct tty_struct *tty);
+static void micvcons_set_termios(struct tty_struct *tty, const struct ktermios * old);
+static void micvcons_timeout(struct timer_list *t);
 static void micvcons_throttle(struct tty_struct *tty);
 static void micvcons_unthrottle(struct tty_struct *tty);
 static void micvcons_wakeup_readbuf(struct work_struct *work);
@@ -79,10 +79,10 @@ micvcons_create(int num_bds)
 
 	if (micvcons_tty)
 		goto exit;
-
-	micvcons_tty = alloc_tty_driver(num_bds);
-	if (!micvcons_tty) {
-		ret = -ENOMEM;
+	micvcons_tty = tty_alloc_driver(num_bds, TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV);
+	if (IS_ERR(micvcons_tty)) {
+		ret = PTR_ERR(micvcons_tty);
+		micvcons_tty = NULL;
 		goto exit;
 	}
 	micvcons_tty->owner = THIS_MODULE;
@@ -106,7 +106,7 @@ micvcons_create(int num_bds)
 
 	if ((ret = tty_register_driver(micvcons_tty)) != 0) {
 		printk("Failed to register vcons tty driver\n");
-		put_tty_driver(micvcons_tty);
+		tty_driver_kref_put(micvcons_tty);
 		micvcons_tty = NULL;
 		goto exit;
 	}
@@ -145,16 +145,14 @@ micvcons_create(int num_bds)
 		}
 		INIT_WORK(&port->dp_wakeup_read_buf, micvcons_wakeup_readbuf);
 	}
-	vcons_timer.function = micvcons_timeout;
-	vcons_timer.data = (unsigned long)(&timer_list_head);
-	init_timer(&vcons_timer);
+	timer_setup(&vcons_timer, micvcons_timeout, 0);
 exit:
 	return ret;
 }
 
 void micvcons_destroy(int num_bds)
 {
-	int bd, ret;
+	int bd;
 	micvcons_port_t *port;
 
 	if (!micvcons_tty)
@@ -164,12 +162,9 @@ void micvcons_destroy(int num_bds)
 		destroy_workqueue(port->dp_wq);
 		tty_unregister_device(micvcons_tty, bd);
 	}
-	ret = tty_unregister_driver(micvcons_tty);
-	put_tty_driver(micvcons_tty);
+	tty_unregister_driver(micvcons_tty);
+	tty_driver_kref_put(micvcons_tty);
 	micvcons_tty = NULL;
-
-	if (ret)
-		printk(KERN_ERR "tty unregister_driver failed with code %d\n", ret);
 }
 
 static int
@@ -268,12 +263,12 @@ micvcons_close(struct tty_struct * tty, struct file * filp)
 	mutex_unlock(&port->dp_mutex);
 }
 
-static int
-micvcons_write(struct tty_struct * tty, const unsigned char *buf, int count)
+static ssize_t
+micvcons_write(struct tty_struct * tty, const unsigned char *buf, size_t count)
 {
 	micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
 	mic_ctx_t *mic_ctx = get_per_dev_ctx(tty->index);
-	int bytes=0, status;
+	ssize_t bytes=0, status;
 	struct vcons_buf *vcons_host_header;
 	u8 card_alive = 1;
 
@@ -301,7 +296,7 @@ exit:
 	return bytes;
 }
 
-static int
+static unsigned int
 micvcons_write_room(struct tty_struct *tty)
 {
 	micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
@@ -318,7 +313,7 @@ micvcons_write_room(struct tty_struct *tty)
 }
 
 static void
-micvcons_set_termios(struct tty_struct *tty, struct ktermios * old)
+micvcons_set_termios(struct tty_struct *tty, const struct ktermios * old)
 {
 }
 
@@ -499,15 +494,15 @@ micvcons_wakeup_readbuf(struct work_struct *work)
 }
 
 static void
-micvcons_timeout(unsigned long data)
+micvcons_timeout(struct timer_list *t)
 {
-	struct list_head *timer_list_ptr = (struct list_head *)data;
+	struct micvcons *vcons = from_timer(vcons, t, timer);
 	micvcons_port_t *port;
 	u8 console_active = 0;
 	int num_chars_read = 0;
 
 	rcu_read_lock();
-	list_for_each_entry_rcu(port, timer_list_ptr, list_member) {
+	list_for_each_entry_rcu(port, &vcons->port_list, list_member) {
 		num_chars_read = micvcons_readport(port);
 		if (num_chars_read != 0)
 			console_active = 1;

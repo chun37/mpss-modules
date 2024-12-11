@@ -77,9 +77,9 @@ ssize_t mic_psmi_read(struct file * filp, char __user *buf,
 	pg_no = *pos / MIC_PSMI_PAGE_SIZE;
 	pg_off = *pos % MIC_PSMI_PAGE_SIZE;
 	while (total_bytes < count) {
-		pci_dma_sync_single_for_cpu(mic_ctx->bi_pdev,
+		dma_sync_single_for_cpu(&mic_ctx->bi_pdev->dev,
 			psmi_ctx->dma_tbl[pg_no + 1].pa,
-				MIC_PSMI_PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
+				MIC_PSMI_PAGE_SIZE, DMA_BIDIRECTIONAL);
 		bytes = MIC_PSMI_PAGE_SIZE - pg_off;
 		if (total_bytes + bytes > count)
 			bytes = count - total_bytes;

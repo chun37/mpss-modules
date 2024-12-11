@@ -34,7 +34,9 @@
  */
 
 #include <linux/string.h>
-
+#include <linux/pci.h>
+#include <linux/dma-mapping.h>
+#include <asm/processor.h>
 #include "mic/micscif_kmem_cache.h"
 #include "micint.h"
 #include "mic_common.h"
@@ -267,15 +269,15 @@ mic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	pci_set_master(pdev);
 	err = pci_reenable_device(pdev);
-	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (err) {
 		printk("mic %d: ERROR DMA not available\n", brdnum);
 		goto probe_freebd;
 	}
-	err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (err) {
 		printk("mic %d: ERROR pci_set_consistent_dma_mask(64) %d\n", brdnum, err);
-		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
+		err = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
 		if (err) {
 			printk("mic %d: ERROR pci_set_consistent_dma_mask(32) %d\n", brdnum, err);
 			goto probe_freebd;
@@ -304,7 +306,7 @@ mic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (mic_msi_enable){
 		for (i = 0; i < MIC_NUM_MSIX_ENTRIES; i ++)
 			bd_info->bi_msix_entries[i].entry = i;
-		err = pci_enable_msix(mic_ctx->bi_pdev, bd_info->bi_msix_entries,
+		err = pci_enable_msix_exact(mic_ctx->bi_pdev, bd_info->bi_msix_entries,
 				      MIC_NUM_MSIX_ENTRIES);
 		if (err == 0 ) {
 			// Only support 1 MSIx for now
@@ -520,7 +522,7 @@ static struct pci_device_id mic_pci_tbl[] = {
 #define MODE_T mode_t
 #endif
 static char *
-mic_devnode(struct device *dev, MODE_T *mode)
+mic_devnode(const struct device *dev, MODE_T *mode)
 {
 	return kasprintf(GFP_KERNEL, "mic/%s", dev_name(dev));
 }
@@ -564,7 +566,7 @@ mic_init(void)
 		goto init_free_region;
 	}
 
-	mic_lindata.dd_class = class_create(THIS_MODULE, "mic");
+	mic_lindata.dd_class = class_create("mic");
 	if (IS_ERR(mic_lindata.dd_class)) {
 		printk("MICDLDR: Error createing mic class\n");
 		cdev_del(&mic_lindata.dd_cdev);
@@ -723,66 +725,65 @@ get_num_devs(mic_ctx_t *mic_ctx, uint32_t *num_devs)
 int
 mic_get_file_size(const char* fn, uint32_t* file_len)
 {
-	struct file *filp;
-	loff_t filp_size;
-	uint32_t status = 0;
-	mm_segment_t fs = get_fs();
+        struct file *filp;
+        loff_t filp_size;
+        uint32_t status = 0;
 
-	set_fs(get_ds());
+        if (!fn || !file_len) {
+                return EINVAL;
+        }
 
-	if (!fn || IS_ERR(filp = filp_open(fn, 0, 0))) {
-		status = EINVAL;
-		goto cleanup_fs;
-	}
+        filp = filp_open(fn, O_RDONLY, 0);
+        if (IS_ERR(filp)) {
+                return EINVAL;
+        }
 
-	filp_size = GET_FILE_SIZE_FROM_INODE(filp);
-	if (filp_size <= 0) {
-		status = EINVAL;
-		goto cleanup_filp;
-	}
+        filp_size = i_size_read(filp->f_path.dentry->d_inode);
+        if (filp_size <= 0) {
+                status = EINVAL;
+                goto cleanup_filp;
+        }
 
-	*file_len = filp_size;
+        *file_len = filp_size;
+
 cleanup_filp:
-	filp_close(filp, current->files);
-cleanup_fs:
-	set_fs(fs);
-	return status;
+        filp_close(filp, current->files);
+        return status;
 }
 
 // loads file from hdd into pci physical memory
 int
 mic_load_file(const char* fn, uint8_t* buffer, uint32_t max_size)
 {
-	long c;
-	int status = 0;
 	struct file *filp;
-	loff_t filp_size, pos = 0;
+	loff_t pos = 0;
+	ssize_t bytes_read;
+        int status = 0;
 
-	mm_segment_t fs = get_fs();
-	set_fs(get_ds());
+        if (!fn || !buffer) {
+                return -EINVAL;
+        }
 
-	if (!fn || IS_ERR(filp = filp_open(fn, 0, 0))) {
-		status = EINVAL;
-		goto cleanup_fs;
-	}
+        filp = filp_open(fn, O_RDONLY, 0);
+        if (IS_ERR(filp)) {
+                return PTR_ERR(filp);
+        }
 
-	filp_size = GET_FILE_SIZE_FROM_INODE(filp);
-	if (filp_size <= 0) {
-		goto cleanup_filp;
-	}
+        loff_t file_size = i_size_read(file_inode(filp));
+        if (file_size <= 0 || file_size > max_size) {
+                status = -EFBIG;
+                goto cleanup_filp;
+        }
 
-	c = vfs_read(filp, buffer, filp_size, &pos);
-	if(c != (long)filp_size) {
-		status = -1; //FIXME
-		goto cleanup_filp;
-	}
+        bytes_read = kernel_read(filp, buffer, file_size, &pos);
+        if (bytes_read != file_size) {
+                status = (bytes_read < 0) ? bytes_read : -EIO;
+                goto cleanup_filp;
+        }
 
 cleanup_filp:
-	filp_close(filp, current->files);
-cleanup_fs:
-	set_fs(fs);
-
-	return status;
+        filp_close(filp, NULL);
+        return status;
 }
 
 module_init(mic_init);

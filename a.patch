@@ -1,0 +1,515 @@
+diff --git a/dma/mic_dma_lib.c b/dma/mic_dma_lib.c
+index 4d44bd8..ddd8e4d 100644
+--- a/dma/mic_dma_lib.c
++++ b/dma/mic_dma_lib.c
+@@ -36,6 +36,7 @@
+ #include<linux/module.h>
+ #include<linux/init.h>
+ #include<linux/slab.h>
++#include<linux/pci.h>
+ #include<asm/io.h>
+ #include<linux/mm.h>
+ #include<linux/kernel.h>
+@@ -215,7 +216,7 @@ alloc_dma_desc_ring_mem(struct dma_channel *ch, struct mic_dma_ctx_t *dma_ctx)
+ 	micscif_pci_dev(dma_ctx->device_num, &pdev);
+ 	ch->desc_ring_phys = mic_map_single(dma_ctx->device_num - 1, pdev, (void *)ch->desc_ring,
+ 			(DMA_DESC_RING_SIZE * sizeof(*ch->desc_ring)) + PAGE_SIZE);
+-	BUG_ON(pci_dma_mapping_error(pdev, ch->desc_ring_phys));
++	BUG_ON(dma_mapping_error(&pdev->dev, ch->desc_ring_phys));
+ #endif
+ }
+ 
+@@ -390,7 +391,7 @@ void mi_mic_dma_chan_set_dstat_wb(struct mic_dma_ctx_t *dma_ctx,
+ 		micscif_pci_dev(dma_ctx->device_num, &pdev);
+ 		chan->dstat_wb_phys = mic_map_single(dma_ctx->device_num - 1, pdev, chan->dstat_wb_loc,
+ 			sizeof(uint32_t));
+-		BUG_ON(pci_dma_mapping_error(pdev, chan->dstat_wb_phys));
++		BUG_ON(dma_mapping_error(&pdev->dev, chan->dstat_wb_phys));
+ #endif
+ 	}
+ 	md_mic_dma_chan_set_dstat_wb(&dma_ctx->dma_dev, chan);
+@@ -1541,18 +1542,18 @@ mic_dma_proc_reg_open(struct inode *inode, struct file *file)
+ 	return single_open(file, mic_dma_proc_reg_show, NULL);
+ }
+ 
+-struct file_operations micdma_ring_fops = {
+-	.open		= mic_dma_proc_ring_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-        .release 	= single_release,
++struct proc_ops micdma_ring_fops = {
++	.proc_open		= mic_dma_proc_ring_open,
++	.proc_read		= seq_read,
++	.proc_lseek		= seq_lseek,
++        .proc_release 	= single_release,
+ };
+ 
+-struct file_operations micdma_reg_fops = {
+-	.open		= mic_dma_proc_reg_open,
+-	.read		= seq_read,
+-	.llseek		= seq_lseek,
+-        .release 	= single_release,
++struct proc_ops micdma_reg_fops = {
++	.proc_open		= mic_dma_proc_reg_open,
++	.proc_read		= seq_read,
++	.proc_lseek		= seq_lseek,
++        .proc_release 	= single_release,
+ };
+ 
+ static void
+diff --git a/host/acptboot.c b/host/acptboot.c
+index a8e6d8c..8ae1345 100644
+--- a/host/acptboot.c
++++ b/host/acptboot.c
+@@ -36,6 +36,7 @@
+ #include <linux/string.h>
+ #include <linux/module.h>
+ #include <linux/kernel.h>
++#include <linux/time64.h>
+ #include <linux/err.h>
+ #include <micint.h>
+ 
+@@ -61,7 +62,7 @@ void acptboot_getconn(struct work_struct *work)
+ 	mic_ctx_t *node_ctx;
+ 	struct scif_portID data;
+ 	scif_epd_t conn_epd;
+-	struct timespec tod;
++	struct timespec64 tod;
+ 	int proto;
+ 	int version;
+ 	int err;
+@@ -101,7 +102,7 @@ void acptboot_getconn(struct work_struct *work)
+ 		break;
+ 
+ 	case ACPT_REQUEST_TIME:
+-		getnstimeofday(&tod);
++		ktime_get_real_ts64(&tod);
+ 		proto = ACPT_TIME_DATA;
+ 		scif_send(conn_epd, &proto, sizeof(proto), SCIF_SEND_BLOCK);
+ 		scif_send(conn_epd, &tod, sizeof(tod), SCIF_SEND_BLOCK);
+diff --git a/host/linpsmi.c b/host/linpsmi.c
+index e78bd9a..55d2a52 100644
+--- a/host/linpsmi.c
++++ b/host/linpsmi.c
+@@ -77,9 +77,9 @@ ssize_t mic_psmi_read(struct file * filp, char __user *buf,
+ 	pg_no = *pos / MIC_PSMI_PAGE_SIZE;
+ 	pg_off = *pos % MIC_PSMI_PAGE_SIZE;
+ 	while (total_bytes < count) {
+-		pci_dma_sync_single_for_cpu(mic_ctx->bi_pdev,
++		dma_sync_single_for_cpu(&mic_ctx->bi_pdev->dev,
+ 			psmi_ctx->dma_tbl[pg_no + 1].pa,
+-				MIC_PSMI_PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
++				MIC_PSMI_PAGE_SIZE, DMA_BIDIRECTIONAL);
+ 		bytes = MIC_PSMI_PAGE_SIZE - pg_off;
+ 		if (total_bytes + bytes > count)
+ 			bytes = count - total_bytes;
+diff --git a/host/linux.c b/host/linux.c
+index 6679307..d681003 100644
+--- a/host/linux.c
++++ b/host/linux.c
+@@ -34,7 +34,9 @@
+  */
+ 
+ #include <linux/string.h>
+-
++#include <linux/pci.h>
++#include <linux/dma-mapping.h>
++#include <asm/processor.h>
+ #include "mic/micscif_kmem_cache.h"
+ #include "micint.h"
+ #include "mic_common.h"
+@@ -267,15 +269,15 @@ mic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 
+ 	pci_set_master(pdev);
+ 	err = pci_reenable_device(pdev);
+-	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
++	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+ 	if (err) {
+ 		printk("mic %d: ERROR DMA not available\n", brdnum);
+ 		goto probe_freebd;
+ 	}
+-	err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
++	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+ 	if (err) {
+ 		printk("mic %d: ERROR pci_set_consistent_dma_mask(64) %d\n", brdnum, err);
+-		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
++		err = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+ 		if (err) {
+ 			printk("mic %d: ERROR pci_set_consistent_dma_mask(32) %d\n", brdnum, err);
+ 			goto probe_freebd;
+@@ -304,7 +306,7 @@ mic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	if (mic_msi_enable){
+ 		for (i = 0; i < MIC_NUM_MSIX_ENTRIES; i ++)
+ 			bd_info->bi_msix_entries[i].entry = i;
+-		err = pci_enable_msix(mic_ctx->bi_pdev, bd_info->bi_msix_entries,
++		err = pci_enable_msix_exact(mic_ctx->bi_pdev, bd_info->bi_msix_entries,
+ 				      MIC_NUM_MSIX_ENTRIES);
+ 		if (err == 0 ) {
+ 			// Only support 1 MSIx for now
+@@ -520,7 +522,7 @@ static struct pci_device_id mic_pci_tbl[] = {
+ #define MODE_T mode_t
+ #endif
+ static char *
+-mic_devnode(struct device *dev, MODE_T *mode)
++mic_devnode(const struct device *dev, MODE_T *mode)
+ {
+ 	return kasprintf(GFP_KERNEL, "mic/%s", dev_name(dev));
+ }
+@@ -564,7 +566,7 @@ mic_init(void)
+ 		goto init_free_region;
+ 	}
+ 
+-	mic_lindata.dd_class = class_create(THIS_MODULE, "mic");
++	mic_lindata.dd_class = class_create("mic");
+ 	if (IS_ERR(mic_lindata.dd_class)) {
+ 		printk("MICDLDR: Error createing mic class\n");
+ 		cdev_del(&mic_lindata.dd_cdev);
+@@ -723,66 +725,65 @@ get_num_devs(mic_ctx_t *mic_ctx, uint32_t *num_devs)
+ int
+ mic_get_file_size(const char* fn, uint32_t* file_len)
+ {
+-	struct file *filp;
+-	loff_t filp_size;
+-	uint32_t status = 0;
+-	mm_segment_t fs = get_fs();
++        struct file *filp;
++        loff_t filp_size;
++        uint32_t status = 0;
+ 
+-	set_fs(get_ds());
++        if (!fn || !file_len) {
++                return EINVAL;
++        }
+ 
+-	if (!fn || IS_ERR(filp = filp_open(fn, 0, 0))) {
+-		status = EINVAL;
+-		goto cleanup_fs;
+-	}
++        filp = filp_open(fn, O_RDONLY, 0);
++        if (IS_ERR(filp)) {
++                return EINVAL;
++        }
+ 
+-	filp_size = GET_FILE_SIZE_FROM_INODE(filp);
+-	if (filp_size <= 0) {
+-		status = EINVAL;
+-		goto cleanup_filp;
+-	}
++        filp_size = i_size_read(filp->f_path.dentry->d_inode);
++        if (filp_size <= 0) {
++                status = EINVAL;
++                goto cleanup_filp;
++        }
++
++        *file_len = filp_size;
+ 
+-	*file_len = filp_size;
+ cleanup_filp:
+-	filp_close(filp, current->files);
+-cleanup_fs:
+-	set_fs(fs);
+-	return status;
++        filp_close(filp, current->files);
++        return status;
+ }
+ 
+ // loads file from hdd into pci physical memory
+ int
+ mic_load_file(const char* fn, uint8_t* buffer, uint32_t max_size)
+ {
+-	long c;
+-	int status = 0;
+ 	struct file *filp;
+-	loff_t filp_size, pos = 0;
+-
+-	mm_segment_t fs = get_fs();
+-	set_fs(get_ds());
+-
+-	if (!fn || IS_ERR(filp = filp_open(fn, 0, 0))) {
+-		status = EINVAL;
+-		goto cleanup_fs;
+-	}
+-
+-	filp_size = GET_FILE_SIZE_FROM_INODE(filp);
+-	if (filp_size <= 0) {
+-		goto cleanup_filp;
+-	}
+-
+-	c = vfs_read(filp, buffer, filp_size, &pos);
+-	if(c != (long)filp_size) {
+-		status = -1; //FIXME
+-		goto cleanup_filp;
+-	}
++	loff_t pos = 0;
++	ssize_t bytes_read;
++        int status = 0;
++
++        if (!fn || !buffer) {
++                return -EINVAL;
++        }
++
++        filp = filp_open(fn, O_RDONLY, 0);
++        if (IS_ERR(filp)) {
++                return PTR_ERR(filp);
++        }
++
++        loff_t file_size = i_size_read(file_inode(filp));
++        if (file_size <= 0 || file_size > max_size) {
++                status = -EFBIG;
++                goto cleanup_filp;
++        }
++
++        bytes_read = kernel_read(filp, buffer, file_size, &pos);
++        if (bytes_read != file_size) {
++                status = (bytes_read < 0) ? bytes_read : -EIO;
++                goto cleanup_filp;
++        }
+ 
+ cleanup_filp:
+-	filp_close(filp, current->files);
+-cleanup_fs:
+-	set_fs(fs);
+-
+-	return status;
++        filp_close(filp, NULL);
++        return status;
+ }
+ 
+ module_init(mic_init);
+diff --git a/host/linvcons.c b/host/linvcons.c
+index f655b9b..223323a 100644
+--- a/host/linvcons.c
++++ b/host/linvcons.c
+@@ -34,16 +34,16 @@
+  */
+ 
+ #include "micint.h"
++#include <linux/tty_driver.h>
+ 
+ /* TODO: Improve debug messages */
+ 
+ static int micvcons_open(struct tty_struct * tty, struct file * filp);
+ static void micvcons_close(struct tty_struct * tty, struct file * filp);
+-static int micvcons_write(struct tty_struct * tty, const unsigned char *buf, 
+-								int count);
+-static int micvcons_write_room(struct tty_struct *tty);
+-static void micvcons_set_termios(struct tty_struct *tty, struct ktermios * old);
+-static void micvcons_timeout(unsigned long);
++static ssize_t micvcons_write(struct tty_struct *tty, const unsigned char *buf, size_t count);
++static unsigned int micvcons_write_room(struct tty_struct *tty);
++static void micvcons_set_termios(struct tty_struct *tty, const struct ktermios * old);
++static void micvcons_timeout(struct timer_list *t);
+ static void micvcons_throttle(struct tty_struct *tty);
+ static void micvcons_unthrottle(struct tty_struct *tty);
+ static void micvcons_wakeup_readbuf(struct work_struct *work);
+@@ -79,10 +79,10 @@ micvcons_create(int num_bds)
+ 
+ 	if (micvcons_tty)
+ 		goto exit;
+-
+-	micvcons_tty = alloc_tty_driver(num_bds);
+-	if (!micvcons_tty) {
+-		ret = -ENOMEM;
++	micvcons_tty = tty_alloc_driver(num_bds, TTY_DRIVER_REAL_RAW | TTY_DRIVER_DYNAMIC_DEV);
++	if (IS_ERR(micvcons_tty)) {
++		ret = PTR_ERR(micvcons_tty);
++		micvcons_tty = NULL;
+ 		goto exit;
+ 	}
+ 	micvcons_tty->owner = THIS_MODULE;
+@@ -106,7 +106,7 @@ micvcons_create(int num_bds)
+ 
+ 	if ((ret = tty_register_driver(micvcons_tty)) != 0) {
+ 		printk("Failed to register vcons tty driver\n");
+-		put_tty_driver(micvcons_tty);
++		tty_driver_kref_put(micvcons_tty);
+ 		micvcons_tty = NULL;
+ 		goto exit;
+ 	}
+@@ -145,16 +145,14 @@ micvcons_create(int num_bds)
+ 		}
+ 		INIT_WORK(&port->dp_wakeup_read_buf, micvcons_wakeup_readbuf);
+ 	}
+-	vcons_timer.function = micvcons_timeout;
+-	vcons_timer.data = (unsigned long)(&timer_list_head);
+-	init_timer(&vcons_timer);
++	timer_setup(&vcons_timer, micvcons_timeout, 0);
+ exit:
+ 	return ret;
+ }
+ 
+ void micvcons_destroy(int num_bds)
+ {
+-	int bd, ret;
++	int bd;
+ 	micvcons_port_t *port;
+ 
+ 	if (!micvcons_tty)
+@@ -164,12 +162,9 @@ void micvcons_destroy(int num_bds)
+ 		destroy_workqueue(port->dp_wq);
+ 		tty_unregister_device(micvcons_tty, bd);
+ 	}
+-	ret = tty_unregister_driver(micvcons_tty);
+-	put_tty_driver(micvcons_tty);
++	tty_unregister_driver(micvcons_tty);
++	tty_driver_kref_put(micvcons_tty);
+ 	micvcons_tty = NULL;
+-
+-	if (ret)
+-		printk(KERN_ERR "tty unregister_driver failed with code %d\n", ret);
+ }
+ 
+ static int
+@@ -268,12 +263,12 @@ micvcons_close(struct tty_struct * tty, struct file * filp)
+ 	mutex_unlock(&port->dp_mutex);
+ }
+ 
+-static int
+-micvcons_write(struct tty_struct * tty, const unsigned char *buf, int count)
++static ssize_t
++micvcons_write(struct tty_struct * tty, const unsigned char *buf, size_t count)
+ {
+ 	micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
+ 	mic_ctx_t *mic_ctx = get_per_dev_ctx(tty->index);
+-	int bytes=0, status;
++	ssize_t bytes=0, status;
+ 	struct vcons_buf *vcons_host_header;
+ 	u8 card_alive = 1;
+ 
+@@ -301,7 +296,7 @@ exit:
+ 	return bytes;
+ }
+ 
+-static int
++static unsigned int
+ micvcons_write_room(struct tty_struct *tty)
+ {
+ 	micvcons_port_t *port = (micvcons_port_t *)tty->driver_data;
+@@ -318,7 +313,7 @@ micvcons_write_room(struct tty_struct *tty)
+ }
+ 
+ static void
+-micvcons_set_termios(struct tty_struct *tty, struct ktermios * old)
++micvcons_set_termios(struct tty_struct *tty, const struct ktermios * old)
+ {
+ }
+ 
+@@ -499,15 +494,15 @@ micvcons_wakeup_readbuf(struct work_struct *work)
+ }
+ 
+ static void
+-micvcons_timeout(unsigned long data)
++micvcons_timeout(struct timer_list *t)
+ {
+-	struct list_head *timer_list_ptr = (struct list_head *)data;
++	struct micvcons *vcons = from_timer(vcons, t, timer);
+ 	micvcons_port_t *port;
+ 	u8 console_active = 0;
+ 	int num_chars_read = 0;
+ 
+ 	rcu_read_lock();
+-	list_for_each_entry_rcu(port, timer_list_ptr, list_member) {
++	list_for_each_entry_rcu(port, &vcons->port_list, list_member) {
+ 		num_chars_read = micvcons_readport(port);
+ 		if (num_chars_read != 0)
+ 			console_active = 1;
+diff --git a/include/mic/micscif_nm.h b/include/mic/micscif_nm.h
+index c8dbca2..e14b680 100644
+--- a/include/mic/micscif_nm.h
++++ b/include/mic/micscif_nm.h
+@@ -100,7 +100,7 @@ micscif_inc_node_refcnt(struct micscif_dev *dev, long cnt)
+ 			SCIFDEV_INIT == dev->sd_state)
+ 			goto bail_out;
+ 		if (test_bit(SCIF_NODE_MAGIC_BIT, 
+-			&dev->scif_ref_cnt.counter)) {
++			(const unsigned long *)&dev->scif_ref_cnt.counter)) {
+ 			/* Notify host that the remote node must be woken */
+ 			struct nodemsg notif_msg;
+ 
+@@ -126,7 +126,7 @@ micscif_inc_node_refcnt(struct micscif_dev *dev, long cnt)
+ 			if (dev->sd_wait_status == OP_COMPLETED) {
+ 				dev->sd_state = SCIFDEV_RUNNING;
+ 				clear_bit(SCIF_NODE_MAGIC_BIT, 
+-					&dev->scif_ref_cnt.counter);
++					(const unsigned long *)&dev->scif_ref_cnt.counter);
+ 			}
+ 		}
+ 		/* The ref count was not added if the node was idle. */
+diff --git a/include/mic/micscif_rma.h b/include/mic/micscif_rma.h
+index f0eb72a..10e391c 100644
+--- a/include/mic/micscif_rma.h
++++ b/include/mic/micscif_rma.h
+@@ -45,6 +45,7 @@
+ #include <linux/hugetlb.h>
+ #endif
+ #endif
++#include <linux/mmap_lock.h>
+ #include "scif.h"
+ #include <linux/errno.h>
+ #include <linux/hardirq.h>
+@@ -55,6 +56,7 @@
+ #include <linux/gfp.h>
+ #include <linux/vmalloc.h>
+ #include <asm/io.h>
++#include <linux/mmzone.h>
+ #include <linux/kernel.h>
+ #include <linux/mm_types.h>
+ #include <linux/jiffies.h>
+@@ -79,6 +81,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/debugfs.h>
+ #include "mic/micscif_kmem_cache.h"
++#include <linux/mm.h>
+ 
+ struct rma_mmu_notifier {
+ #ifdef CONFIG_MMU_NOTIFIER
+@@ -832,7 +835,7 @@ static __always_inline void *scif_zalloc(size_t size)
+ 	if (!align)
+ 		return NULL;
+ 
+-	if (align <= (1 << (MAX_ORDER + PAGE_SHIFT - 1)))
++	if (align <= (1 << (MAX_ORDER_NR_PAGES + PAGE_SHIFT - 1)))
+ 		if ((ret = (void*)__get_free_pages(GFP_KERNEL | __GFP_ZERO,
+ 						get_order(align))))
+ 			goto done;
+@@ -915,18 +918,18 @@ static inline int __scif_dec_pinned_vm_lock(struct mm_struct *mm,
+ {
+ 	if (mm && nr_pages && mic_ulimit_check) {
+ 		if (try_lock) {
+-			if (!down_write_trylock(&mm->mmap_sem)) {
++			if (!down_write_trylock(&mm->mmap_lock)) {
+ 				return -1;
+ 			}
+ 		} else {
+-			down_write(&mm->mmap_sem);
++			mmap_write_lock(mm);
+ 		}
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 1, 0))
+-		mm->pinned_vm -= nr_pages;
++		atomic64_sub(nr_pages, &mm->pinned_vm);
+ #else
+ 		mm->locked_vm -= nr_pages;
+ #endif
+-		up_write(&mm->mmap_sem);
++		mmap_write_unlock(mm);
+ 	}
+ 	return 0;
+ }
+@@ -938,7 +941,7 @@ static inline int __scif_check_inc_pinned_vm(struct mm_struct *mm,
+ 		unsigned long locked, lock_limit;
+ 		locked = nr_pages;
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 1, 0))
+-		locked += mm->pinned_vm;
++		locked += atomic64_read(&mm->pinned_vm);
+ #else
+ 		locked += mm->locked_vm;
+ #endif
+@@ -949,7 +952,7 @@ static inline int __scif_check_inc_pinned_vm(struct mm_struct *mm,
+ 			return -ENOMEM;
+ 		} else {
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 1, 0))
+-			mm->pinned_vm = locked;
++			atomic64_set(&mm->pinned_vm, locked);
+ #else
+ 			mm->locked_vm = locked;
+ #endif

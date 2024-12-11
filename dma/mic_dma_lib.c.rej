@@ -1,0 +1,23 @@
+--- dma/mic_dma_lib.c
++++ dma/mic_dma_lib.c
+@@ -1563,7 +1564,7 @@ int mic_dma_proc_init(void)
+ 
+         static const struct proc_ops micdma_ring_proc_ops = {
+                 .proc_open = micdma_ring_open,
+-                .proc_read = seq_read,
++                .proc_read = seq_read
+         };
+         if (!proc_create(name, S_IFREG | S_IRUGO, NULL, &micdma_ring_proc_ops))
+                 return -ENOMEM;
+@@ -1571,6 +1572,11 @@ int mic_dma_proc_init(void)
+         name = "mic_dma/reg";
++        static const struct proc_ops micdma_reg_proc_ops = {
++                .proc_open = micdma_reg_open,
++                .proc_read = seq_read
++        };
++
+         if (!proc_create(name, S_IFREG | S_IRUGO, NULL, &micdma_reg_proc_ops))
+                 return -ENOMEM;
+ 
+         return 0;
+ }
